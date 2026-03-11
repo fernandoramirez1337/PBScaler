@@ -14,17 +14,23 @@ PBScaler is a bottleneck-aware autoscaling framework for Kubernetes microservice
 # Install dependencies
 pip install -r requirements.txt
 
-# Train the SLO violation prediction model (required before running PBScaler)
-cd simulation && python RandomForestClassify.py
-
-# Run the autoscaler
-python main.py
-
 # Run the test suite (no live cluster needed — uses mock Prometheus + K8s)
 pytest tests/test_pipeline.py -v
 
-# Collect post-experiment metrics to CSV
-# (called programmatically from MetricCollect.collect(config, config.data_dir))
+# Run a single test class or test
+pytest tests/test_pipeline.py::TestAnomalyDetection -v
+pytest tests/test_pipeline.py::TestGAOptimisation::test_choose_action_scales_checkout -v
+
+# Train the SLO violation prediction model (required before running PBScaler)
+cd simulation && python RandomForestClassify.py
+
+# Run the autoscaler (requires live cluster + Prometheus)
+python main.py
+
+# Full experiment on GKE (setup → run → collect → plot)
+bash scripts/setup_gke.sh
+bash scripts/run_pbscaler_pymoo.sh
+bash scripts/teardown_gke.sh
 ```
 
 ## Configuration
@@ -58,7 +64,7 @@ Environment variables (`K8S_NAMESPACE`, `K8S_CONFIG`, `PROM_RANGE_URL`, `PROM_QU
 
 ### Core Loop (`PBScaler.py`)
 
-Two concurrent loops:
+Two concurrent scheduled loops:
 
 1. **Anomaly detection** (every 15s): Queries Prometheus for p90 call latencies. Flags edges where `latency > SLO * 1.1` using a one-sample t-test (CONF=0.05, ALPHA=0.2).
 
@@ -69,10 +75,12 @@ When anomalies are detected:
 - Computes **topology potential** per service (summing direct + propagated anomaly weights)
 - Runs **PageRank** with topology potential as personalization vector
 - Selects top-K=2 services not already at `max_pod`
-- Runs **Genetic Algorithm** (`util/GA.py`) to find optimal replica vector
+- Runs **Genetic Algorithm** (`util/GA.py`, pymoo) to find optimal replica vector
   - Population: 50, Generations: 5
   - Fitness: `0.5 * SLO_reward + 0.5 * cost_reward`, evaluated using the pre-trained RandomForest model
 - Applies scaling via `KubernetesClient.patch_namespaced_deployment_scale()`
+
+Log messages use structured prefixes: `INIT:`, `ANOMALY:`, `PAGERANK:`, `GA_OPT:`, `GA_INIT:`, `GA_EVOLVE:`, `GA_FITNESS:`, `WASTE:`, `SCALE:`.
 
 ### Key Modules
 
@@ -81,14 +89,12 @@ When anomalies are detected:
 | `PBScaler.py` | Core algorithm: anomaly detection, root cause analysis, GA optimization |
 | `util/PrometheusClient.py` | All Prometheus queries (latency p50/p90/p99, QPS, CPU, memory) |
 | `util/KubernetesClient.py` | K8s API: list deployments, get/set replica counts |
-| `util/GA.py` | Genetic algorithm using `geatpy` library |
-| `util/PCAUtil.py` | PCA dimensionality reduction helpers |
-| `util/Spectrum.py` | Spectral analysis utilities |
+| `util/GA.py` | Genetic algorithm using `pymoo` (ElementwiseProblem + GA solver) |
 | `monitor/MetricCollect.py` | Post-experiment metric export to CSV files |
 | `simulation/RandomForestClassify.py` | Train the SLO violation predictor used by GA fitness |
 | `config/Config.py` | Loads `config.yaml`; exposes runtime parameters |
-| `evaluation/Evaluation.py` | Metric evaluation and comparison across experiments |
-| `evaluation/Draw.py` | Plotting helpers for evaluation results |
+
+Pre-trained models live in `simulation/boutique/RandomForestClassify.model` and `simulation/train_ticket/rf.pkl`.
 
 ### Baseline Controllers (`others/`)
 
@@ -101,13 +107,27 @@ Selectable via `initController()` in `main.py`:
 
 ### RL Module (`RL/`)
 
-An experimental reinforcement learning branch for autoscaling (not used by `main.py`):
-
+Experimental reinforcement learning branch for autoscaling (not used by `main.py`):
 - `RL/Environment.py` — Gym-style environment wrapping Prometheus + K8s
-- `RL/Simulation.py` — Simulation harness for RL training
 - `RL/common/` — Shared GNN components: `GAT.py`, `MPNN.py`, `StateModel.py`
-- `RL/film/` — Standard RL agents: `D3QN`, `DDPG`, `TD3`, actor-critic
-- `RL/grScaler/` — Graph-aware RL agents (`GrScaler_D3QN`, `GrScaler_TD3`, `GraScaler_DDPG`)
+- `RL/film/` — Standard RL agents: `D3QN`, `DDPG`, `TD3`
+- `RL/grScaler/` — Graph-aware RL agents
+
+### Experiment Scripts (`scripts/`)
+
+| Script | Role |
+|--------|------|
+| `setup_gke.sh` | Provision GKE cluster, install Istio + Prometheus, deploy app |
+| `teardown_gke.sh` | Delete GKE cluster and clean up |
+| `gke.env` | Shared GKE config (PROJECT_ID, CLUSTER_NAME, namespaces) |
+| `run_khpa_baseline.sh` | Run KHPA baseline experiment end-to-end |
+| `run_pbscaler_baseline.sh` | Run PBScaler baseline experiment end-to-end |
+| `run_pbscaler_pymoo.sh` | Run PBScaler with pymoo GA + comprehensive analysis |
+| `locustfile.py` | Staged ramp load generator (10→200 users, 10 min) |
+| `collect_metrics.py` | Post-run Prometheus→CSV metric collection |
+| `plot_results.py` | Per-experiment plots (latency, replicas, resources) |
+| `plot_comparison.py` | Cross-experiment comparison charts (KHPA vs PBScaler) |
+| `generate_training_data.py` | Generate RandomForest training data from experiment CSVs |
 
 ### Benchmarks
 
@@ -115,7 +135,7 @@ Two test applications in `benchmarks/`:
 - **Online Boutique** (`microservices-demo/`) — 10 microservices (Go, Python, etc.)
 - **Train-Ticket** (`train-ticket/`) — 43 microservices (Java Spring Boot)
 
-Deploy with: `kubectl apply -f <manifest>.yaml`
+Deploy with: `kubectl apply -f benchmarks/<app>/kubernetes-manifests/`
 
 ### Data Flow
 
@@ -140,7 +160,7 @@ Prometheus  → PrometheusClient → PBScaler
 - **Phase 3** — `TestGAOptimisation`: verifies `choose_action('add')` calls `patch_scale()` within bounds
 - **TestScenarioSwitching**: verifies the mock server switches scenarios at runtime
 
-Mocks live in `tests/mocks/`: `MockPrometheusServer` (real HTTP, no live Prometheus), `MockKubernetesClient`, and `SCENARIOS` (normal_load, single_bottleneck, cascading_bottleneck). `GA` is replaced with a lightweight `MockGA` to avoid the `geatpy` / model-file dependency.
+Mocks live in `tests/mocks/`: `MockPrometheusServer` (real HTTP, no live Prometheus), `MockKubernetesClient`, and `SCENARIOS` (normal_load, single_bottleneck, cascading_bottleneck). `GA` is replaced with a lightweight `MockGA` to avoid the model-file dependency.
 
 ## Known Issues
 
