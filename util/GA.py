@@ -1,15 +1,45 @@
-import geatpy as ea
 import numpy as np
-import time
-import pandas as pd
+import logging
 import joblib
+
+from pymoo.core.problem import ElementwiseProblem
+from pymoo.algorithms.soo.nonconvex.ga import GA as PymooGA
+from pymoo.operators.crossover.sbx import SBX
+from pymoo.operators.mutation.pm import PM
+from pymoo.operators.sampling.rnd import IntegerRandomSampling
+from pymoo.operators.repair.rounding import RoundingRepair
+from pymoo.optimize import minimize
+from pymoo.termination import get_termination
+from pymoo.core.callback import Callback
 
 LAMBDA = 0.5
 
+logger = logging.getLogger('pbscaler.ga')
+
+
+class _HistoryCallback(Callback):
+    """Record mean and best fitness each generation."""
+
+    def __init__(self):
+        super().__init__()
+        self.history = []
+
+    def notify(self, algorithm):
+        f_vals = algorithm.pop.get("F").flatten()
+        # pymoo minimizes, so negate back for logging
+        mean_fit = -np.mean(f_vals)
+        best_fit = -np.min(f_vals)
+        self.history.append((mean_fit, best_fit))
+
+
 class GA:
-    def __init__(self, model_path, n_dim, lb, ub, goal = 'max', size_pop=50, max_iter=5, prob_cross = 0.9, prob_mut=0.01, precision=1, encoding = 'BG', selectStyle=None, recStyle=None, mutStyle=None, seed=None):
-        
-        np.random.seed(seed)
+    def __init__(self, model_path, n_dim, lb, ub, goal='max', size_pop=50,
+                 max_iter=5, prob_cross=0.9, prob_mut=0.01, precision=1,
+                 encoding='BG', selectStyle=None, recStyle=None,
+                 mutStyle=None, seed=None):
+
+        if seed is not None:
+            np.random.seed(seed)
         self.predictor = joblib.load(model_path)
 
         self.dim = n_dim
@@ -17,28 +47,14 @@ class GA:
         self.ub = ub
         self.size_pop = size_pop
         self.max_iter = max_iter
-        self.encoding = encoding
-        self.selectStyle = selectStyle # binary tournament
-        self.recStyle =recStyle # two-point crossover operator
-        self.mutStyle =mutStyle # binary-chromosome mutation operator
-        self.pc= prob_cross # crossover probability
-        self.pm = prob_mut # mutation probability
+        self.goal = goal
+        self.pc = prob_cross
+        self.pm = prob_mut
 
-        # 1 means to minimize the target function
-        # -1 means to maximize objective function
-        self.goal = np.array([-1]) if goal == 'max' else np.array([1])
+        self.obj_trace = np.zeros((self.max_iter, 2))
 
-        self.ranges = np.array([lb,ub])
-        lbin, ubin = [1] * self.dim, [1] * self.dim # Lower and upper boundary of the decision variable
-        self.borders=np.array([lbin,ubin])
-        self.varTypes = np.array([precision] * self.dim) # type of the decision variable，[0 means continuous and 1 means discrete]
-        self.Field = self.__set_chromosome()
-        
-        Lind =int(np.sum(self.Field[0, :])) # Calculate chromosome length
-        self.obj_trace = np.zeros((self.max_iter, 2)) # record the value of object function  
-        self.var_trace = np.zeros((self.max_iter, Lind)) # record the best individuals in history
+        logger.debug(f'GA_INIT: model_path={model_path}, dim={n_dim}, lb={lb}, ub={ub}')
 
-    
     def set_env(self, workloads: list, svcs: list, bottlenecks: list, r: dict):
         if len(bottlenecks) != self.dim:
             raise Exception('the action dim must equal the length of bottlencks')
@@ -46,20 +62,7 @@ class GA:
         self.svcs = svcs
         self.bottlenecks = bottlenecks
         self.r = r
-        
-    
-    def __set_chromosome(self):
-        '''
-            set the configuration of chromosome
-        '''
-        codes = [1] * self.dim # Gray code
-        precisions =[6] * self.dim # Encoding precision of decision variables
-        scales = [0] * self.dim # arithmetic scale
 
-        # decoding matrix
-        Field =ea.crtfld(self.encoding, self.varTypes, self.ranges, self.borders, precisions,codes,scales)
-        return Field
-    
     def fitness(self, action):
         x = []
         index = 0
@@ -71,80 +74,62 @@ class GA:
             else:
                 x.extend([i, self.workloads[i], self.r[svc]])
         x = np.array(x).reshape(1, -1)
-        R1 = self.predictor.predict(x).tolist()[0] 
+        R1 = self.predictor.predict(x).tolist()[0]
         R2 = (1 - (np.sum(action) / np.sum(self.ub)))
-        return [LAMBDA * R1 + (1 - LAMBDA) * R2]
-
-
-    def __aim(self, Phen):
-        return np.apply_along_axis(self.fitness, 1, Phen)
-
+        combined = LAMBDA * R1 + (1 - LAMBDA) * R2
+        logger.debug(f'GA_FITNESS: action={action}, R1(SLO)={R1:.4f}, R2(cost)={R2:.4f}, combined={combined:.4f}')
+        return [combined]
 
     def evolve(self):
-        # Generate the matrix for chromosome population
-        Chrom = ea.crtpc(self.encoding, self.size_pop, self.Field)
-        # Decode the initial population
-        variable = ea.bs2ri(Chrom, self.Field)
-        # Calculate the value of objective function for the initial population individual
-        ObjV = self.__aim(variable)
-        # Record the index of the best individuals
-        best_ind = np.argmax(ObjV)
-        X_best = 0
+        ga_ref = self
 
-        n_elites = int(self.size_pop / 2)
+        class _ReplicaProblem(ElementwiseProblem):
+            def __init__(self):
+                super().__init__(
+                    n_var=ga_ref.dim,
+                    n_obj=1,
+                    xl=np.array(ga_ref.lb, dtype=float),
+                    xu=np.array(ga_ref.ub, dtype=float),
+                    vtype=int,
+                )
 
-        for gen in range(self.max_iter):
-            # Assign fitness values according to the value of the objective function
-            FitnV = ea.ranking(self.goal * ObjV)
-            # Select
-            SelCh = Chrom[ea.selecting(self.selectStyle, FitnV, self.size_pop - n_elites), :]
-            # Recombine
-            SelCh = ea.recombin(self.recStyle, SelCh, self.pc)
-            # Mutate
-            SelCh = ea.mutate(self.mutStyle, self.encoding, SelCh, self.pm)
-            # A new generation population is obtained by merging the chromosomes of the elite parent and offspring
-            top_k_idx=ObjV.flatten().argsort()[::-1][0:n_elites]
-            Chrom = np.vstack([Chrom[top_k_idx, :], SelCh])
-            # Decode the population (binary to decimal)
-            Phen = ea.bs2ri(Chrom, self.Field)
+            def _evaluate(self, x, out, *args, **kwargs):
+                fit = ga_ref.fitness(x.astype(int))[0]
+                # pymoo minimizes; negate for maximization
+                out["F"] = -fit if ga_ref.goal == 'max' else fit
 
-            # Calculate objective function value for population
-            ObjV = self.__aim(Phen)
-            # Record the index of the best individuals
-            best_ind = np.argmax(ObjV)
-            # Record the mean of the objective function value for the population
-            self.obj_trace[gen,0]=np.sum(ObjV)/ObjV.shape[0]
-            X_best = ObjV[best_ind] if ObjV[best_ind] > X_best else X_best
-            self.obj_trace[gen,1]=X_best
-            self.var_trace[gen,:]=Chrom[best_ind,:]
-            pass
-        # Finish
-        ea.trcplot(self.obj_trace, [['average fitness of population','max fitness of population']])
+        problem = _ReplicaProblem()
 
-        res = []
-        best_gen = np.argmax(self.obj_trace[:, [1]])
-        # print('The value of the optimal solution is：', self.obj_trace[best_gen, 1])
-        variable = ea.bs2ri(self.var_trace[[best_gen], :], self.Field) # decode
-        # print('The decision variable value of the optimal solution are')
-        for i in range(variable.shape[1]):
-            # print('x'+str(i)+'=',variable[0, i])
-            res.append(variable[0, i])
+        algorithm = PymooGA(
+            pop_size=self.size_pop,
+            sampling=IntegerRandomSampling(),
+            crossover=SBX(prob=self.pc, eta=3.0, vtype=float, repair=RoundingRepair()),
+            mutation=PM(prob=self.pm, eta=3.0, vtype=float, repair=RoundingRepair()),
+            eliminate_duplicates=True,
+        )
+
+        callback = _HistoryCallback()
+
+        result = minimize(
+            problem,
+            algorithm,
+            termination=get_termination("n_gen", self.max_iter),
+            seed=None,
+            callback=callback,
+            verbose=False,
+        )
+
+        # Build obj_trace from callback history
+        for gen, (mean_f, best_f) in enumerate(callback.history):
+            if gen < self.max_iter:
+                self.obj_trace[gen, 0] = mean_f
+                self.obj_trace[gen, 1] = best_f
+                logger.info(f'GA_EVOLVE: gen={gen}, mean_fitness={mean_f:.4f}, best_fitness={best_f:.4f}')
+
+        res = result.X.astype(int).tolist()
+        best_gen = int(np.argmax(self.obj_trace[:, 1]))
+        best_fitness = self.obj_trace[best_gen, 1]
+
+        logger.info(f'GA_EVOLVE: Final — best_gen={best_gen}, best_fitness={best_fitness:.4f}, solution={res}')
 
         return res
-
-
-# if __name__ == '__main__':
-#     workloads = [0, 0, 0, 0, 0, 2.622222222222222, 4.5777777777777775, 0, 40.02222222222223, 1.2888888888888888, 4.0, 0, 0, 2.2666666666666666, 0, 0, 5.022222222222222, 2.2444444444444445, 0.0, 0, 0, 3.2666666666666666, 4.955555555555555, 0, 0, 0, 1.8444444444444443, 0, 0, 76.37777777777777, 3.977777777777778, 0, 51.911111111111104, 0, 40.3111111111111, 7.822222222222222, 0, 13.177777777777775, 10.755555555555556, 42.66666666666666, 0.0, 0, 0]
-#     svcs = ['ts-admin-basic-info-service', 'ts-admin-order-service', 'ts-admin-route-service', 'ts-admin-travel-service', 'ts-admin-user-service', 'ts-assurance-service', 'ts-auth-service', 'ts-avatar-service', 'ts-basic-service', 'ts-cancel-service', 'ts-config-service', 'ts-consign-price-service', 'ts-consign-service', 'ts-contacts-service', 'ts-delivery-service', 'ts-execute-service', 'ts-food-map-service', 'ts-food-service', 'ts-inside-payment-service', 'ts-news-service', 'ts-notification-service', 'ts-order-other-service', 'ts-order-service', 'ts-payment-service', 'ts-preserve-other-service', 'ts-preserve-service', 'ts-price-service', 'ts-rebook-service', 'ts-route-plan-service', 'ts-route-service', 'ts-seat-service', 'ts-security-service', 'ts-station-service', 'ts-ticket-office-service', 'ts-ticketinfo-service', 'ts-train-service', 'ts-travel-plan-service', 'ts-travel-service', 'ts-travel2-service', 'ts-ui-dashboard', 'ts-user-service', 'ts-verification-code-service', 'ts-voucher-service']
-#     bottlenecks = ['ts-auth-service', 'ts-ui-dashboard']
-#     dim = len(bottlenecks)
-#     max_num, min_num = 15, 1
-#     ub, lb = [max_num] * dim, [min_num] * dim
-#     r = dict.fromkeys(svcs, 1)
-
-#     opter = GA('/home/ubuntu/xsy/experiment/autoscaling/simulation/train_ticket/RandomForestClassify.model', dim, lb, ub, 'max', size_pop=50, max_iter=5, prob_cross=0.9, prob_mut=0.01, precision=1, encoding='BG', selectStyle='tour', recStyle='xovdp', mutStyle='mutbin', seed=1)
-#     opter.set_env(workloads, svcs, bottlenecks, r)
-
-#     opter.evolve()
-
-#     print(opter.fitness([3,1]))

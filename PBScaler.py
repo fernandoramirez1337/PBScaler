@@ -1,5 +1,7 @@
 import math
 import time
+import logging
+import os
 import numpy as np
 import schedule
 from copy import deepcopy
@@ -14,11 +16,19 @@ from util.PrometheusClient import PrometheusClient
 
 warnings.filterwarnings("ignore")
 
+logger = logging.getLogger('pbscaler')
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+
 def coast_time(func):
     def fun(*args, **kwargs):
         t = time.perf_counter()
         result = func(*args, **kwargs)
-        print(f'func {func.__name__} coast time:{time.perf_counter() - t:.8f} s')
+        elapsed = time.perf_counter() - t
+        logger.debug(f'func {func.__name__} coast time:{elapsed:.8f} s')
         return result
     return fun
 
@@ -39,16 +49,24 @@ class PBScaler:
         self.prom_util = PrometheusClient(config)
         self.k8s_util = KubernetesClient(config)
         # simulation environment
+        logger.info(f'INIT: Loading model from {simulation_model_path}')
+        model_exists = os.path.isfile(simulation_model_path)
+        logger.info(f'INIT: Model file exists={model_exists}')
+        if model_exists:
+            mtime = time.ctime(os.path.getmtime(simulation_model_path))
+            logger.info(f'INIT: Model file mtime={mtime}')
         self.predictor = joblib.load(simulation_model_path)
         # args
         self.SLO = config.SLO
         self.max_num = config.max_pod
         self.min_num = config.min_pod
+        logger.info(f'INIT: SLO={self.SLO}ms, max_pod={self.max_num}, min_pod={self.min_num}, namespace={config.namespace}')
         # microservices
         self.mss = self.k8s_util.get_svcs_without_state()
+        logger.info(f'INIT: Discovered {len(self.mss)} services: {self.mss}')
         self.roots = None
         self.svc_counts = None
-        
+
 
     @coast_time
     def anomaly_detect(self):
@@ -56,10 +74,14 @@ class PBScaler:
         """
         # get service count
         self.svc_counts = self.k8s_util.get_svcs_counts()
+        logger.debug(f'ANOMALY: Current replica counts: {self.svc_counts}')
         ab_calls = self.get_abnormal_calls()
         # abnormal
         if len(ab_calls) > 0:
+            logger.info(f'ANOMALY: Detected {len(ab_calls)} abnormal calls, triggering root cause analysis')
             self.root_analysis(ab_calls=ab_calls)
+        else:
+            logger.debug('ANOMALY: No abnormal calls detected')
 
     @coast_time
     def waste_detection(self):
@@ -68,6 +90,7 @@ class PBScaler:
         # check the front SLO
         ab_calls = self.get_abnormal_calls()
         if len(ab_calls) > 0:
+            logger.debug('WASTE: Skipping waste detection — abnormal calls present')
             return
         # check qps
         cur_time = int(round(time.time()))
@@ -89,9 +112,13 @@ class PBScaler:
         for svc in self.mss:
             if svc in now_qps_df.columns and svc in old_qps_df.columns:
                 t, p = scipy.stats.ttest_ind(now_qps_df[svc], old_qps_df[svc] * BETA, equal_var=False)
-                if t < 0 and p <= CONF:
+                flagged = t < 0 and p <= CONF
+                logger.debug(f'WASTE: {svc} t_stat={t:.4f} p_value={p:.4f} flagged={flagged}')
+                if flagged:
                     waste_mss.append(svc)
+        logger.info(f'WASTE: Waste candidates (before min_pod filter): {waste_mss}')
         self.roots = list(filter(lambda ms: self.svc_counts[ms] > self.min_num, waste_mss))
+        logger.info(f'WASTE: Waste roots (after min_pod filter): {self.roots}')
         if len(self.roots) != 0:
             self.choose_action(option='reduce')
 
@@ -103,15 +130,14 @@ class PBScaler:
         # slo Hypothesis testing
         ab_calls = []
         call_latency = self.prom_util.get_call_latency()
+        threshold = self.SLO * (1 + ALPHA / 2)
+        logger.debug(f'ANOMALY: Retrieved {len(call_latency)} call edges, threshold={threshold:.1f}ms')
         for call, latency in call_latency.items():
-            if latency > self.SLO * (1 + ALPHA / 2):
+            is_abnormal = latency > threshold
+            logger.debug(f'ANOMALY:   {call}: latency={latency:.1f}ms abnormal={is_abnormal}')
+            if is_abnormal:
                 ab_calls.append(call)
-        # call_latency = self.prom_util.get_call_p90_latency_range()
-        # for call, latency in call_latency.iteritems():
-        #     if call != 'timestamp':
-        #         _, p = scipy.stats.ttest_1samp(latency.values, self.SLO * self.alpha, alternative='greater')
-        #         if p < self.conf:
-        #             ab_calls.append(call)
+        logger.info(f'ANOMALY: {len(ab_calls)} abnormal calls out of {len(call_latency)} total')
         return ab_calls
 
     @coast_time
@@ -126,13 +152,20 @@ class PBScaler:
         """
         ab_dg, personal_array = self.build_abnormal_subgraph(ab_calls)
         nodes = [node for node in ab_dg.nodes]
+        edges_info = [(u, v, d.get('weight', 0)) for u, v, d in ab_dg.edges(data=True)]
+        logger.info(f'PAGERANK: Abnormal subgraph — nodes={nodes}, edges={edges_info}')
+        logger.info(f'PAGERANK: Topology potential (personalization): {personal_array}')
         if len(nodes) == 1:
             res = [(nodes[0], 1)]
         else:
             res = nx.pagerank(ab_dg, alpha=0.85, personalization=personal_array, max_iter=1000)
             res = sorted(res.items(), key=lambda x: x[1], reverse=True)
+        logger.info(f'PAGERANK: Full ranking: {res}')
         res = [ms for ms, _ in res]
         self.roots = list(filter(lambda root: self.svc_counts[root] + 1 < self.max_num, res))[:K]
+        logger.info(f'PAGERANK: Selected roots (after max_pod filter, top-K={K}): {self.roots}')
+        if len(self.roots) == 0:
+            logger.warning('PAGERANK: No roots remain after filtering — all at max_pod or no candidates')
         # trigger the choose_action
         if len(self.roots) != 0:
             self.choose_action('add')
@@ -150,61 +183,47 @@ class PBScaler:
 
         dim = len(roots)
         if option == 'add':
-            print('begin scale out')
+            logger.info(f'GA_OPT: Begin scale OUT — roots={roots}, current_replicas={{t: r[t] for t in roots}}')
             min_array, max_array = [r[t]+1 for t in self.roots if r[t] < self.max_num] , [self.max_num] * dim
         elif option == 'reduce':
-            print('begin scale in')
+            logger.info(f'GA_OPT: Begin scale IN — roots={roots}, current_replicas={{t: r[t] for t in roots}}')
             min_array, max_array = [self.min_num] * dim, [r[t] for t in roots if r[t] > self.min_num]
             thesold_array = np.array(max_array) - 1
             min_array = np.maximum(min_array, thesold_array)
         else:
             raise NotImplementedError()
+        logger.info(f'GA_OPT: dim={dim}, min_array={min_array}, max_array={max_array}')
         qps = self.prom_util.get_svc_qps()
         for ms in mss:
             if ms + '&qps' in qps.keys():
                 workloads.append(qps[ms + '&qps'])
             else:
                 workloads.append(0)
+        logger.debug(f'GA_OPT: Workloads vector: {workloads}')
         '''
         optimizing with genetic algorithms
         only optimize the root services
         TODO: base the root score
         '''
-        opter = GA('/home/ubuntu/xsy/experiment/autoscaling/simulation/train_ticket/RandomForestClassify.model', dim, min_array, max_array, 'max', size_pop=50, max_iter=5, prob_cross=0.9, prob_mut=0.01, precision=1, encoding='BG', selectStyle='tour', recStyle='xovdp', mutStyle='mutbin', seed=1)
+        opter = GA(self.config.simulation_model, dim, min_array, max_array, 'max', size_pop=50, max_iter=5, prob_cross=0.9, prob_mut=0.01, precision=1, encoding='BG', selectStyle='tour', recStyle='xovdp', mutStyle='mutbin', seed=1)
 
         opter.set_env(workloads, mss, roots, r)
         res = opter.evolve()
+
+        if hasattr(opter, 'obj_trace'):
+            best_gen = np.argmax(opter.obj_trace[:, [1]])
+            best_fitness = opter.obj_trace[best_gen, 1]
+            logger.info(f'GA_OPT: GA result — proposed replicas={res}, best_fitness={best_fitness:.4f}, best_gen={best_gen}')
+        else:
+            logger.info(f'GA_OPT: GA result — proposed replicas={res}')
 
         actions = deepcopy(self.svc_counts)
         for i in range(dim):
             svc = self.roots[i]
             actions[svc] = res[i]
 
+        logger.info(f'GA_OPT: Final actions (all services → target replicas): {actions}')
         self.execute_task(actions)
-
-    # def fitness(self, action):
-    #     """
-    #     calculate the reward
-    #     :param action: the iterative result
-    #     :return: reward
-    #     """
-    #     root_mss = copy.deepcopy(self.roots)
-    #     x = []
-    #     for i in range(len(self.mss)):
-    #         ms = self.mss[i]
-    #         ms_qps_key = ms + '&qps'
-    #         ms_qps = 0 if ms_qps_key not in self.qps.keys() else self.qps[ms + '&qps']
-    #         if ms in root_mss:
-    #             # root services: the iterative result
-    #             x.extend([i, ms_qps, action[root_mss.index(ms)]])
-    #         else:
-    #             # the initial count
-    #             x.extend([i, ms_qps, self.svc_counts[ms]])
-    #     x = np.array(x).reshape(1, -1)
-    #     slo_reward = self.predictor.predict(x).tolist()[0]
-    #     cost_reward = 1 - (np.sum(x) / (self.max_num * len(self.mss)))
-    #     return - (slo_reward + cost_reward)
-        # return - self.predictor.predict(x).tolist()[0]
 
     def build_abnormal_subgraph(self, ab_calls):
         """
@@ -215,8 +234,8 @@ class PBScaler:
         ab_sets = set()
         for ab_call in ab_calls:
             ab_sets.update(ab_call.split('_'))
-        if 'unknown' in ab_sets: ab_sets.remove('unknown')
-        if 'istio-ingressgateway' in ab_sets: ab_sets.remove('istio-ingressgateway')
+        for skip in ('unknown', 'istio-ingressgateway', 'loadgenerator'):
+            ab_sets.discard(skip)
         ab_mss = list(ab_sets)
         ab_mss.sort()
         begin = int(round((time.time() - 60)))
@@ -231,7 +250,7 @@ class PBScaler:
         edges = []
         for ab_call in ab_calls:
             edge = ab_call.split('_')
-            if 'unknown' in edge or 'istio-ingressgateway' in edge:
+            if 'unknown' in edge or 'istio-ingressgateway' in edge or 'loadgenerator' in edge:
                 continue
             metric_df = ab_metric_df[[col for col in ab_metric_df.columns if col.startswith(edge[1])]]
             edges.append((edge[0], edge[1], self.cal_weight(ab_svc_latency_df[edge[0]], metric_df)))
@@ -255,17 +274,6 @@ class PBScaler:
                 max_corr = temp
         return max_corr
 
-    # def get_neigbors(self, g, node, depth=1):
-    #     output = {}
-    #     layers = dict(nx.bfs_successors(g, source=node, depth_limit=depth))
-    #     nodes = [node]
-    #     for i in range(1, depth + 1):
-    #         output[i] = []
-    #         for x in nodes:
-    #             output[i].extend(layers.get(x, []))
-    #         nodes = output[i]
-    #     return output
-    
     def cal_topology_potential(self, ab_DG, anomaly_score_map: dict):
         personal_array = {}
         for node in ab_DG.nodes:
@@ -281,61 +289,24 @@ class PBScaler:
             personal_array[node] = potential
         return personal_array
 
-    # AAMR http://ksiresearch.org/seke/seke21paper/paper091.pdf
-    # def cal_ixscore(self, dg, ab_dg, anomaly_score_map: dict):
-    #     ix_all = {}
-    #     scores = []
-    #     for ms in ab_dg.nodes:
-    #         x = anomaly_score_map[ms]
-    #         neighbors = list(dg.neighbors(ms))
-    #         AANs = 0
-    #         for AAN in neighbors:
-    #             AS = anomaly_score_map[AAN] if AAN in anomaly_score_map else 1
-    #             AANs += AS
-    #         i_score = AANs / dg.degree(ms)
-
-    #         n2 = self.get_neigbors(dg, ms, 2)[2]
-    #         NHANs = 0
-    #         degree2sum = 1
-    #         for NHAN in n2:
-    #             AS = anomaly_score_map[NHAN] if NHAN in anomaly_score_map else 1
-    #             degree2sum += dg.degree(NHAN)
-    #             NHANs += AS
-    #         x_score = x / dg.degree(ms) - NHANs / degree2sum
-    #         ix_score = i_score + x_score
-    #         ix_all[ms] = ix_score
-    #         scores.append(ix_score)
-    #     for svc, score in ix_all.items():
-    #         score = (score - min(scores)) / (max(scores) - min(scores) + 1e-11)
-    #         ix_all[svc] = score
-    #     return ix_all
-
     def execute_task(self, actions):
         for ms in self.mss:
-            self.k8s_util.patch_scale(ms, int(actions[ms]))
-            print('scale {} to {}'.format(ms, int(actions[ms])))
+            before = self.svc_counts.get(ms, '?')
+            after = int(actions[ms])
+            self.k8s_util.patch_scale(ms, after)
+            logger.info(f'SCALE: {ms} {before} -> {after}')
 
     def start(self):
-        print("PBScaler is running...")
+        logger.info("PBScaler is running...")
         schedule.clear()
         schedule.every(AB_CHECK_INTERVAL).seconds.do(self.anomaly_detect)
         schedule.every(WASTE_CHECK_INTERVAL).seconds.do(self.waste_detection)
         time_start = time.time()
-        
+
         while True:
             time_c = time.time() - time_start
             if time_c > self.config.duration:
+                logger.info(f'Duration {self.config.duration}s reached, stopping.')
                 schedule.clear()
                 break
             schedule.run_pending()
-
-
-# if __name__ == '__main__':
-#     config = Config()
-#     data_path = 'output/PBScaler/'
-#     simulation_model_path = '/home/ubuntu/xsy/experiment/autoscaling/simulation/train_ticket/RandomForestClassify.model'
-#     scaler = PBScaler(config=config, simulation_model_path=simulation_model_path)
-#     scaler.start()
-#     config.end = int(round(time.time()))
-#     config.start = config.end - config.duration
-#     collect(config, data_path)

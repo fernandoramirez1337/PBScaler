@@ -17,30 +17,42 @@ pip install -r requirements.txt
 # Train the SLO violation prediction model (required before running PBScaler)
 cd simulation && python RandomForestClassify.py
 
-# Run the autoscaler (edit main.py for paths first)
+# Run the autoscaler
 python main.py
 
-# Collect post-experiment metrics to CSV
-# (called programmatically from MetricCollect.collect(config, './output'))
-```
+# Run the test suite (no live cluster needed — uses mock Prometheus + K8s)
+pytest tests/test_pipeline.py -v
 
-There is no test suite. Validation is done by running experiments against real or simulated Kubernetes clusters.
+# Collect post-experiment metrics to CSV
+# (called programmatically from MetricCollect.collect(config, config.data_dir))
+```
 
 ## Configuration
 
-All runtime parameters live in `config/Config.py`. Before running, set:
+All runtime parameters live in **`config.yaml`** at the project root. `config/Config.py` reads this file on startup; never edit Config.py directly.
 
-```python
-self.namespace    # K8s namespace (default: 'default')
-self.SLO          # Target p90 latency in ms (default: 200)
-self.max_pod      # Max replicas per service (default: 8)
-self.k8s_config   # Path to kubeconfig file
-self.prom_range_url    # Prometheus query_range URL
-self.prom_no_range_url # Prometheus instant query URL
-self.duration     # Experiment duration in seconds (default: 1200)
+```yaml
+kubernetes:
+  namespace: default
+  kubeconfig: ~/.kube/config   # override with K8S_CONFIG env var
+
+prometheus:
+  range_url: http://localhost:9090/api/v1/query_range   # override with PROM_RANGE_URL
+  query_url:  http://localhost:9090/api/v1/query        # override with PROM_QUERY_URL
+  step: 5
+
+autoscaler:
+  slo: 200          # target p90 latency in ms
+  max_pod: 8
+  min_pod: 1
+  duration: 1200    # seconds
+  simulation_model: simulation/boutique/RandomForestClassify.model  # relative to project root
+
+output:
+  data_dir: output
 ```
 
-**Note**: `main.py` has a hardcoded `simulation_model_path` that must point to a pre-trained `.model` file.
+Environment variables (`K8S_NAMESPACE`, `K8S_CONFIG`, `PROM_RANGE_URL`, `PROM_QUERY_URL`) take precedence over `config.yaml` values.
 
 ## Architecture
 
@@ -70,9 +82,13 @@ When anomalies are detected:
 | `util/PrometheusClient.py` | All Prometheus queries (latency p50/p90/p99, QPS, CPU, memory) |
 | `util/KubernetesClient.py` | K8s API: list deployments, get/set replica counts |
 | `util/GA.py` | Genetic algorithm using `geatpy` library |
+| `util/PCAUtil.py` | PCA dimensionality reduction helpers |
+| `util/Spectrum.py` | Spectral analysis utilities |
 | `monitor/MetricCollect.py` | Post-experiment metric export to CSV files |
 | `simulation/RandomForestClassify.py` | Train the SLO violation predictor used by GA fitness |
-| `config/Config.py` | Singleton config for all runtime parameters |
+| `config/Config.py` | Loads `config.yaml`; exposes runtime parameters |
+| `evaluation/Evaluation.py` | Metric evaluation and comparison across experiments |
+| `evaluation/Draw.py` | Plotting helpers for evaluation results |
 
 ### Baseline Controllers (`others/`)
 
@@ -81,7 +97,17 @@ Selectable via `initController()` in `main.py`:
 - `'MicroScaler'` — Bayesian optimization per service
 - `'SHOWAR'` — PID controller with topology awareness
 - `'KHPA'` — wraps Kubernetes HPA
-- `'random'` / `None` — ablation baselines
+- `'random'` — random scaling baseline
+
+### RL Module (`RL/`)
+
+An experimental reinforcement learning branch for autoscaling (not used by `main.py`):
+
+- `RL/Environment.py` — Gym-style environment wrapping Prometheus + K8s
+- `RL/Simulation.py` — Simulation harness for RL training
+- `RL/common/` — Shared GNN components: `GAT.py`, `MPNN.py`, `StateModel.py`
+- `RL/film/` — Standard RL agents: `D3QN`, `DDPG`, `TD3`, actor-critic
+- `RL/grScaler/` — Graph-aware RL agents (`GrScaler_D3QN`, `GrScaler_TD3`, `GraScaler_DDPG`)
 
 ### Benchmarks
 
@@ -94,7 +120,8 @@ Deploy with: `kubectl apply -f <manifest>.yaml`
 ### Data Flow
 
 ```
-Prometheus → PrometheusClient → PBScaler
+config.yaml → Config → PBScaler
+Prometheus  → PrometheusClient → PBScaler
                                     ├── Anomaly detection (t-test)
                                     ├── Root cause analysis (PageRank)
                                     └── GA optimization (RandomForest fitness)
@@ -104,9 +131,19 @@ Prometheus → PrometheusClient → PBScaler
                                     MetricCollect → CSV output
 ```
 
+## Tests
+
+`tests/test_pipeline.py` covers the three pipeline phases without a live cluster:
+
+- **Phase 1** — `TestAnomalyDetection`: verifies `get_abnormal_calls()` for normal/single/cascading scenarios
+- **Phase 2** — `TestRootCauseAnalysis`: verifies PageRank surfaces the correct root-cause service
+- **Phase 3** — `TestGAOptimisation`: verifies `choose_action('add')` calls `patch_scale()` within bounds
+- **TestScenarioSwitching**: verifies the mock server switches scenarios at runtime
+
+Mocks live in `tests/mocks/`: `MockPrometheusServer` (real HTTP, no live Prometheus), `MockKubernetesClient`, and `SCENARIOS` (normal_load, single_bottleneck, cascading_bottleneck). `GA` is replaced with a lightweight `MockGA` to avoid the `geatpy` / model-file dependency.
+
 ## Known Issues
 
-- `monitor/MetricCollect.py` has a bug: `os._dir.exists()` should be `os.path.exists()`
 - Training data paths in `simulation/RandomForestClassify.py` are hardcoded
 - No connectivity checks for Prometheus or Kubernetes on startup
-- `main.py` simulation model path is hardcoded and must be updated per environment
+- `RL/Environment.py` hardcodes `redis-cart` node removal and `SLO=200`, bypassing `config.yaml`

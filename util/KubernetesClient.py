@@ -28,7 +28,7 @@ class KubernetesClient():
                 if state_svc in svc:
                     return True
             return False
-        svcs = [i.metadata.name for i in ret.items if not judge_state_svc(i.metadata.name)]
+        svcs = [i.metadata.name for i in ret.items if not judge_state_svc(i.metadata.name) and i.metadata.name != 'loadgenerator']
         svcs.sort()
         return svcs
 

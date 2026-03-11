@@ -1,5 +1,5 @@
 kubernetes:
-  namespace: default
+  namespace: online-boutique
   # Path to kubeconfig file. Override with env var K8S_CONFIG.
   kubeconfig: ~/.kube/config
   # Path to the Kubernetes manifest to apply (used by KubernetesClient.update_yaml).
@@ -13,9 +13,9 @@ prometheus:
 
 autoscaler:
   slo: 200         # target p90 latency in milliseconds
-  max_pod: 8
+  max_pod: 5
   min_pod: 1
-  duration: 1200   # experiment duration in seconds (1200 = 20 min)
+  duration: 660    # experiment duration in seconds (600s load + 60s buffer)
   # Path to the pre-trained RandomForest .model file.
   # Relative paths are resolved from the project root.
   simulation_model: simulation/boutique/RandomForestClassify.model

@@ -1,11 +1,4 @@
 import time
-from others.KHPA import KHPA
-from others.MicroScaler import MicroScaler
-from others.Showar import Showar
-from others.NoneController import NoneController
-from others.RandomController import RandomController
-from PBScaler import PBScaler
-from monitor import MetricCollect
 from config.Config import Config
 import warnings
 warnings.filterwarnings("ignore")
@@ -13,17 +6,22 @@ warnings.filterwarnings("ignore")
 
 def initController(name: str, config: Config):
     if name == 'MicroScaler':
+        from others.MicroScaler import MicroScaler
         return MicroScaler(config)
     elif name == 'SHOWAR':
+        from others.Showar import Showar
         return Showar(config)
     elif name == 'KHPA':
+        from others.KHPA import KHPA
         return KHPA(config)
     elif name == 'random':
+        from others.RandomController import RandomController
         return RandomController(config)
     elif name == 'PBScaler':
+        from PBScaler import PBScaler
         return PBScaler(config, config.simulation_model)
     else:
-        raise NotImplementedError() 
+        raise NotImplementedError()
 
 
 if __name__ == '__main__':
@@ -33,4 +31,5 @@ if __name__ == '__main__':
     controller.start()
 
     # collect metrics
+    from monitor import MetricCollect
     MetricCollect.collect(config, config.data_dir)
