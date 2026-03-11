@@ -21,8 +21,7 @@ def initController(name: str, config: Config):
     elif name == 'random':
         return RandomController(config)
     elif name == 'PBScaler':
-        simulation_model_path = '/home/ubuntu/xsy/experiment/autoscaling/simulation/train_ticket/RandomForestClassify.model'
-        return PBScaler(config, simulation_model_path)
+        return PBScaler(config, config.simulation_model)
     else:
         raise NotImplementedError() 
 
@@ -34,5 +33,4 @@ if __name__ == '__main__':
     controller.start()
 
     # collect metrics
-    data_path = './output'
-    MetricCollect.collect(config, data_path)
+    MetricCollect.collect(config, config.data_dir)

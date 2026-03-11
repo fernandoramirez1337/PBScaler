@@ -169,7 +169,7 @@ def collect_svc_qps(config: Config, _dir: str):
 def collect_svc_metric(config: Config, _dir: str):
     prom_util = PrometheusClient(config)
     final_df = prom_util.get_svc_metric_range()
-    final_df.to_csv(_dir + 'svc_metric.csv', index=False)
+    final_df.to_csv(os.path.join(_dir, 'svc_metric.csv'), index=False)
 
 
 # Get the success rate for microservices
@@ -200,8 +200,8 @@ def collect_succeess_rate(config: Config, _dir: str):
 
 def collect(config: Config, _dir: str):
     print('collect metrics')
-    if not os._dir.exists(_dir):
-        os.make_dirs(_dir)
+    if not os.path.exists(_dir):
+        os.makedirs(_dir)
     collect_call_latency(config, _dir)
     collect_svc_latency(config, _dir)
     collect_resource_metric(config, _dir)

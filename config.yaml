@@ -1,0 +1,26 @@
+kubernetes:
+  namespace: default
+  # Path to kubeconfig file. Override with env var K8S_CONFIG.
+  kubeconfig: ~/.kube/config
+  # Path to the Kubernetes manifest to apply (used by KubernetesClient.update_yaml).
+  manifest: ""
+
+prometheus:
+  # Override with env vars PROM_RANGE_URL and PROM_QUERY_URL.
+  range_url: http://localhost:9090/api/v1/query_range
+  query_url: http://localhost:9090/api/v1/query
+  step: 5
+
+autoscaler:
+  slo: 200         # target p90 latency in milliseconds
+  max_pod: 8
+  min_pod: 1
+  duration: 1200   # experiment duration in seconds (1200 = 20 min)
+  # Path to the pre-trained RandomForest .model file.
+  # Relative paths are resolved from the project root.
+  simulation_model: simulation/boutique/RandomForestClassify.model
+
+output:
+  # Directory for post-experiment CSV files.
+  # Relative paths are resolved from the project root.
+  data_dir: output

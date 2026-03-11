@@ -1,6 +1,9 @@
+import os
 import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
@@ -47,7 +50,7 @@ if __name__ == '__main__':
     model = RandomForestClassifier()
     # datas_x, datas_y = data_loader('../train_data/train_ticket/train_data.csv')
 
-    datas_x, datas_y = data_loader('../train_data/boutique/real_trace_5s_2.0.csv')
+    datas_x, datas_y = data_loader(os.path.join(_SCRIPT_DIR, '../train_data/boutique/real_trace_5s_2.0.csv'))
     X_train, X_test, y_train, y_test = train_test_split(datas_x, datas_y)
 
     model.fit(X_train, y_train)
@@ -60,5 +63,5 @@ if __name__ == '__main__':
 
     fpr, tpr, thresholds = roc_curve(y_test,y_pred,pos_label=None,sample_weight=None,drop_intermediate=True)
     res = {'fpr': fpr, 'tpr': tpr, 'thresholds': thresholds}
-    pickle.dump(res, open('train_ticket/rf.pkl', 'wb'))
-    joblib.dump(model, './boutique/RandomForestClassify.model')
+    pickle.dump(res, open(os.path.join(_SCRIPT_DIR, 'train_ticket/rf.pkl'), 'wb'))
+    joblib.dump(model, os.path.join(_SCRIPT_DIR, 'boutique/RandomForestClassify.model'))
