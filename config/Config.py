@@ -52,5 +52,14 @@ class Config():
             else os.path.join(_PROJECT_ROOT, raw_data_dir)
         )
 
+        # NaiveTemporalGate baseline config (Cap_3:226-228).
+        # Maps service name -> cooldown seconds after scale-up.
+        # Empty dict (no temporal_gate block) means no blocking (gate is no-op).
+        gate = cfg.get('temporal_gate', {})
+        self.temporal_gate_cold_times: dict[str, int] = {
+            str(svc): int(seconds)
+            for svc, seconds in gate.get('cold_times', {}).items()
+        }
+
         self.start = getNowTime()
         self.end = self.start + self.duration

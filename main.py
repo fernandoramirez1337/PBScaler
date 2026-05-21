@@ -20,6 +20,9 @@ def initController(name: str, config: Config):
     elif name == 'PBScaler':
         from PBScaler import PBScaler
         return PBScaler(config, config.simulation_model)
+    elif name == 'NaiveTemporalGate':
+        from others.NaiveTemporalGate import NaiveTemporalGate
+        return NaiveTemporalGate(config)
     else:
         raise NotImplementedError()
 
