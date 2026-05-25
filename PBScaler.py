@@ -158,7 +158,15 @@ class PBScaler:
         if len(nodes) == 1:
             res = [(nodes[0], 1)]
         else:
-            res = nx.pagerank(ab_dg, alpha=0.85, personalization=personal_array, max_iter=1000)
+            try:
+                res = nx.pagerank(ab_dg, alpha=0.85, personalization=personal_array, max_iter=1000)
+            except ZeroDivisionError:
+                # NetworkX raises this when the graph weights sum to zero
+                # (sparse anomalies with all NaN/0 latency on TT). No actionable
+                # signal this cycle — fall back to the topology potential
+                # ranking. Sprint 1B fork patch.
+                logger.warning('PAGERANK: graph weights degenerate (ZeroDivisionError) — falling back to personalization ranking')
+                res = personal_array if isinstance(personal_array, dict) else {n: 1.0 for n in nodes}
             res = sorted(res.items(), key=lambda x: x[1], reverse=True)
         logger.info(f'PAGERANK: Full ranking: {res}')
         res = [ms for ms, _ in res]
@@ -207,7 +215,8 @@ class PBScaler:
         '''
         opter = GA(self.config.simulation_model, dim, min_array, max_array, 'max', size_pop=50, max_iter=5, prob_cross=0.9, prob_mut=0.01, precision=1, encoding='BG', selectStyle='tour', recStyle='xovdp', mutStyle='mutbin', seed=1)
 
-        opter.set_env(workloads, mss, roots, r)
+        extra_kwargs = self._ga_extra_set_env_kwargs(mss)
+        opter.set_env(workloads, mss, roots, r, **extra_kwargs)
         res = opter.evolve()
 
         if hasattr(opter, 'obj_trace'):
@@ -252,6 +261,14 @@ class PBScaler:
             edge = ab_call.split('_')
             if 'unknown' in edge or 'istio-ingressgateway' in edge or 'loadgenerator' in edge:
                 continue
+            # On Train Ticket some services appear as call sources but lack
+            # their own latency series in Prometheus (Istio collects metrics
+            # only for services that have inbound HTTP traffic during the
+            # window). Skip these edges rather than KeyError. Sprint 1B fork
+            # patch — does not affect OB which has fully populated metrics.
+            if edge[0] not in ab_svc_latency_df.columns:
+                logger.debug(f'ANOMALY: skipping edge {edge[0]}->{edge[1]} (no latency data for source)')
+                continue
             metric_df = ab_metric_df[[col for col in ab_metric_df.columns if col.startswith(edge[1])]]
             edges.append((edge[0], edge[1], self.cal_weight(ab_svc_latency_df[edge[0]], metric_df)))
         ab_dg.add_weighted_edges_from(edges)
@@ -259,6 +276,11 @@ class PBScaler:
         # calculate topology potential
         anomaly_score_map = {}
         for node in ab_mss:
+            if node not in ab_svc_latency_df.columns:
+                # Same defensive case as above — node in call graph but no
+                # latency series. Treat as zero anomaly score.
+                anomaly_score_map[node] = 0
+                continue
             e_latency_array = ab_svc_latency_df[node]
             ef = e_latency_array[e_latency_array > self.SLO].count()
             anomaly_score_map[node] = ef
@@ -289,6 +311,10 @@ class PBScaler:
             personal_array[node] = potential
         return personal_array
 
+    def _ga_extra_set_env_kwargs(self, mss):
+        """Extra kwargs passed to GA.set_env. Subclasses override to enable keff. Cap_3 sec:nivel1."""
+        return {}
+
     def execute_task(self, actions):
         for ms in self.mss:
             before = self.svc_counts.get(ms, '?')
@@ -296,11 +322,25 @@ class PBScaler:
             self.k8s_util.patch_scale(ms, after)
             logger.info(f'SCALE: {ms} {before} -> {after}')
 
+    def _safe_anomaly_detect(self):
+        """Wrapper that prevents transient errors from killing the loop.
+        Sprint 1B fork patch — see also pagerank ZeroDivisionError guard."""
+        try:
+            self.anomaly_detect()
+        except Exception:
+            logger.exception('ANOMALY: unhandled exception in anomaly_detect — skipping this cycle')
+
+    def _safe_waste_detection(self):
+        try:
+            self.waste_detection()
+        except Exception:
+            logger.exception('WASTE: unhandled exception in waste_detection — skipping this cycle')
+
     def start(self):
         logger.info("PBScaler is running...")
         schedule.clear()
-        schedule.every(AB_CHECK_INTERVAL).seconds.do(self.anomaly_detect)
-        schedule.every(WASTE_CHECK_INTERVAL).seconds.do(self.waste_detection)
+        schedule.every(AB_CHECK_INTERVAL).seconds.do(self._safe_anomaly_detect)
+        schedule.every(WASTE_CHECK_INTERVAL).seconds.do(self._safe_waste_detection)
         time_start = time.time()
 
         while True:

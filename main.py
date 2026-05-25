@@ -23,6 +23,9 @@ def initController(name: str, config: Config):
     elif name == 'NaiveTemporalGate':
         from others.NaiveTemporalGate import NaiveTemporalGate
         return NaiveTemporalGate(config)
+    elif name == 'PBScaler-keff':
+        from others.PBScalerKeff import PBScalerKeff
+        return PBScalerKeff(config)
     else:
         raise NotImplementedError()
 
