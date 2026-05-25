@@ -61,5 +61,18 @@ class Config():
             for svc, seconds in gate.get('cold_times', {}).items()
         }
 
+        # PBScaler-keff config (Cap_3 sec:nivel1, sec:nivel2). T_cold values
+        # reuse temporal_gate.cold_times so both controllers stay aligned.
+        # Empty dict (no keff block) keeps the GA in legacy mode.
+        keff_cfg = cfg.get('keff', {})
+        self.keff_alpha: float = float(keff_cfg.get('alpha', 0.45))
+        self.keff_beta: float = float(keff_cfg.get('beta', 0.45))
+        self.keff_lambda_csp: float = float(keff_cfg.get('lambda_csp', 0.10))
+        self.keff_warmup_curve: str = str(keff_cfg.get('warmup_curve', 'step'))
+        self.keff_t_cold: dict[str, float] = {
+            str(svc): float(seconds)
+            for svc, seconds in gate.get('cold_times', {}).items()
+        }
+
         self.start = getNowTime()
         self.end = self.start + self.duration

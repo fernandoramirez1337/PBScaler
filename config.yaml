@@ -20,6 +20,7 @@ output:
 # Scale-down is never blocked (preserves PBScaler-k_eff's differential value;
 # see plan ~/.claude/plans/noble-sparking-riddle.md, decision 2026-05-21).
 # Values per Cap_3 Tabla tab:tcold_expected for Online Boutique stacks.
+# Reused by the PBScaler-keff controller below as T_cold_i per service.
 temporal_gate:
   cold_times:
     adservice: 60              # Java/Spring Boot
@@ -32,3 +33,15 @@ temporal_gate:
     productcatalogservice: 2   # Go
     recommendationservice: 8   # Python
     shippingservice: 2         # Go
+
+# PBScaler-keff parameters (Cap_3 sec:nivel1, sec:nivel2, eq:fitness_new).
+# Defaults match Cap_3:161: alpha = beta = 0.45, lambda_csp = 0.10 with the
+# invariant alpha + beta + lambda_csp = 1. warmup_curve picks one of the three
+# curves defined in Cap_3 sec:warmup_functions (step | linear | sigmoid);
+# Cap_3:267 fixes the empirical comparison to PFC III, this iteration uses step.
+# T_cold values are read from temporal_gate.cold_times above.
+keff:
+  alpha: 0.45
+  beta: 0.45
+  lambda_csp: 0.10
+  warmup_curve: step
