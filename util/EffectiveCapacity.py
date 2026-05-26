@@ -52,7 +52,15 @@ def f_sigmoid(t: float, t_cold: float) -> float:
     The affine rescaling makes f(0) = 0 and f(t_cold) = 1 exact (up to
     floating-point error), matching the boundary conditions of f_step
     and f_linear so the three curves are interchangeable in eq:keff.
+
+    For t > t_cold the unclamped formula climbs above 1.0 because the
+    canonical sigmoid keeps growing past its midpoint; we clamp at 1.0
+    so a single replica never reports capacity above its nominal value.
     """
+    if t <= 0.0:
+        return 0.0
+    if t >= t_cold:
+        return 1.0
     kappa = 10.0 / t_cold
     half = t_cold / 2.0
     num = _sigma(kappa * (t - half)) - _sigma(-kappa * half)
