@@ -79,6 +79,17 @@ class TestFSigmoid:
         assert f_sigmoid(self.T_COLD / 4, self.T_COLD) < 0.5
         assert f_sigmoid(3 * self.T_COLD / 4, self.T_COLD) > 0.5
 
+    def test_clamped_above_t_cold(self):
+        # Regression: the unclamped affine sigmoid climbs above 1.0 for
+        # t > T_cold (discovered by the k3d dynamic smoke). We clamp so a
+        # single replica never contributes more than its nominal capacity.
+        assert f_sigmoid(self.T_COLD + 0.1, self.T_COLD) == 1.0
+        assert f_sigmoid(self.T_COLD * 5, self.T_COLD) == 1.0
+
+    def test_clamped_below_zero(self):
+        # Negative ages (clock skew) clamp to 0 like the other curves.
+        assert f_sigmoid(-1.0, self.T_COLD) == 0.0
+
 
 class TestComputeKeff:
     """compute_keff aggregates per-pod contributions. Cap_3 eq:keff."""
