@@ -67,7 +67,18 @@ class Config():
         keff_cfg = cfg.get('keff', {})
         self.keff_alpha: float = float(keff_cfg.get('alpha', 0.45))
         self.keff_beta: float = float(keff_cfg.get('beta', 0.45))
-        self.keff_lambda_csp: float = float(keff_cfg.get('lambda_csp', 0.10))
+        # lambda_csp: env override (PBSCALER_LAMBDA_CSP) takes precedence over
+        # config.yaml, so the Cap_3:267 lambda sensitivity sweep can vary it
+        # per run without editing source or config. beta is rebalanced to keep
+        # the invariant alpha + beta + lambda_csp = 1 (Cap_3:161).
+        lambda_csp = float(os.environ.get(
+            'PBSCALER_LAMBDA_CSP', keff_cfg.get('lambda_csp', 0.10)
+        ))
+        self.keff_lambda_csp: float = lambda_csp
+        if 'PBSCALER_LAMBDA_CSP' in os.environ:
+            # Preserve alpha == beta symmetry while satisfying the sum-to-1
+            # invariant: alpha = beta = (1 - lambda_csp) / 2.
+            self.keff_alpha = self.keff_beta = (1.0 - lambda_csp) / 2.0
         self.keff_warmup_curve: str = str(keff_cfg.get('warmup_curve', 'step'))
         self.keff_t_cold: dict[str, float] = {
             str(svc): float(seconds)

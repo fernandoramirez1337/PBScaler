@@ -33,6 +33,11 @@ class PBScalerKeff(PBScaler):
         super().__init__(config, config.simulation_model)
         self._t_cold: dict[str, float] = dict(config.keff_t_cold)
         self._warmup_curve: str = config.keff_warmup_curve
+        # Cap_3 eq:fitness_new weights (config-driven so the lambda sensitivity
+        # sweep can vary lambda_csp per run without editing source).
+        self._alpha: float = config.keff_alpha
+        self._beta: float = config.keff_beta
+        self._lambda_csp: float = config.keff_lambda_csp
         # Per-cycle cache of pod states keyed by service.
         self._pod_states: dict[str, list[dict]] = {}
         logger.info(
@@ -128,4 +133,7 @@ class PBScalerKeff(PBScaler):
             },
             "t_cold_by_svc": dict(self._t_cold),
             "warmup_curve": self._warmup_curve,
+            "alpha": self._alpha,
+            "beta": self._beta,
+            "lambda_csp": self._lambda_csp,
         }

@@ -43,6 +43,9 @@ def _make_keff(
     keff._t_cold = dict(t_cold or {})
     keff._warmup_curve = warmup_curve
     keff._pod_states = dict(pod_states or {})
+    keff._alpha = 0.45
+    keff._beta = 0.45
+    keff._lambda_csp = 0.10
     keff.k8s_util = MagicMock()
     return keff
 
@@ -166,7 +169,7 @@ class TestAntiScaleDown:
 class TestGaExtraKwargs:
     """Verifies the GA receives the keff params for Niveles 1 + 2 wiring."""
 
-    def test_returns_all_three_keys(self):
+    def test_returns_expected_keys(self):
         keff = _make_keff(
             svc_counts={"checkout": 1},
             t_cold={"checkout": 5.0},
@@ -176,7 +179,11 @@ class TestGaExtraKwargs:
         kwargs = keff._ga_extra_set_env_kwargs(["checkout"])
         assert set(kwargs.keys()) == {
             "pod_states_by_svc", "t_cold_by_svc", "warmup_curve",
+            "alpha", "beta", "lambda_csp",
         }
+        # weights flow from config (here the test-helper defaults)
+        assert kwargs["lambda_csp"] == 0.10
+        assert kwargs["alpha"] == 0.45
 
     def test_pod_states_filtered_to_mss(self):
         # Even though _pod_states has both, only the requested mss are passed.

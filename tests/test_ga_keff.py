@@ -77,6 +77,41 @@ class TestKeffToggle:
         assert ga._keff_enabled() is True
 
 
+class TestFitnessWeightOverride:
+    """Cap_3:267 lambda sensitivity — set_env can override alpha/beta/lambda_csp."""
+
+    def test_defaults_when_not_passed(self, ga):
+        ga.set_env(WORKLOADS, SVCS, BOTTLENECKS, R_CURRENT,
+                   pod_states_by_svc={"checkout": [], "payment": []},
+                   t_cold_by_svc=T_COLD)
+        assert ga.alpha == pytest.approx(ALPHA)
+        assert ga.beta == pytest.approx(BETA)
+        assert ga.lambda_csp == pytest.approx(LAMBDA_CSP)
+
+    def test_override_applied(self, ga):
+        ga.set_env(WORKLOADS, SVCS, BOTTLENECKS, R_CURRENT,
+                   pod_states_by_svc={"checkout": [], "payment": []},
+                   t_cold_by_svc=T_COLD,
+                   alpha=0.40, beta=0.40, lambda_csp=0.20)
+        assert ga.lambda_csp == pytest.approx(0.20)
+        assert ga.alpha == pytest.approx(0.40)
+
+    def test_lambda_changes_fitness(self, ga):
+        # Same action, different lambda_csp -> different combined fitness when
+        # CSP is nonzero. action adds replicas to high-T_cold payment.
+        base_kwargs = dict(
+            pod_states_by_svc={"checkout": [], "payment": []},
+            t_cold_by_svc=T_COLD,
+        )
+        ga.set_env(WORKLOADS, SVCS, BOTTLENECKS, R_CURRENT,
+                   lambda_csp=0.05, alpha=0.475, beta=0.475, **base_kwargs)
+        f_low = ga.fitness([2, 4])[0]
+        ga.set_env(WORKLOADS, SVCS, BOTTLENECKS, R_CURRENT,
+                   lambda_csp=0.20, alpha=0.40, beta=0.40, **base_kwargs)
+        f_high = ga.fitness([2, 4])[0]
+        assert f_low != pytest.approx(f_high)
+
+
 class TestCspMax:
     def test_csp_max_per_eq_csp_max(self, ga):
         # CSP_max = sum (ub - lb) * T_cold over bottlenecks

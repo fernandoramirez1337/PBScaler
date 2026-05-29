@@ -10,7 +10,7 @@ autoscaler:
   slo: 500
   max_pod: 5
   min_pod: 1
-  duration: 660
+  duration: 1800
   simulation_model: simulation/boutique/RandomForestClassify.model
 output:
   data_dir: output

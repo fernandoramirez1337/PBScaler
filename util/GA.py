@@ -72,6 +72,9 @@ class GA:
         pod_states_by_svc: dict | None = None,
         t_cold_by_svc: dict | None = None,
         warmup_curve: str = "step",
+        alpha: float | None = None,
+        beta: float | None = None,
+        lambda_csp: float | None = None,
     ):
         """Configure the GA with the current cluster snapshot.
 
@@ -80,6 +83,10 @@ class GA:
         k_eff (Cap_3 sec:nivel1) and the fitness adds the ColdStartPenalty
         term (Cap_3 sec:nivel2). Otherwise the legacy PBScaler fitness is
         used.
+
+        alpha/beta/lambda_csp override the module-level Cap_3 eq:fitness_new
+        weights when provided (used by the lambda sensitivity analysis,
+        Cap_3:267). When None, the defaults ALPHA/BETA/LAMBDA_CSP apply.
         """
         if len(bottlenecks) != self.dim:
             raise Exception('the action dim must equal the length of bottlencks')
@@ -90,6 +97,9 @@ class GA:
         self.pod_states_by_svc = pod_states_by_svc
         self.t_cold_by_svc = t_cold_by_svc
         self.warmup_curve = warmup_curve
+        self.alpha = ALPHA if alpha is None else float(alpha)
+        self.beta = BETA if beta is None else float(beta)
+        self.lambda_csp = LAMBDA_CSP if lambda_csp is None else float(lambda_csp)
         if self._keff_enabled():
             # Cap_3 eq:csp_max — sum over bottleneck dims of (max-min) * T_cold.
             self.csp_max = float(sum(
@@ -139,7 +149,7 @@ class GA:
             # so the GA's max objective penalizes high cold-start cost.
             csp = self._cold_start_penalty(action)
             csp_hat = csp / self.csp_max if self.csp_max > 0 else 0.0
-            combined = ALPHA * R1 + BETA * R2 + LAMBDA_CSP * (1.0 - csp_hat)
+            combined = self.alpha * R1 + self.beta * R2 + self.lambda_csp * (1.0 - csp_hat)
             logger.debug(
                 f'GA_FITNESS_KEFF: action={action}, R1={R1:.4f}, R2={R2:.4f}, '
                 f'CSP_hat={csp_hat:.4f}, combined={combined:.4f}'
