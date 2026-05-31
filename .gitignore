@@ -33,6 +33,9 @@ simulation/train_ticket/*.model
 .DS_Store
 Thumbs.db
 
+# Editor / manual backups
+*.bak
+
 # Environment
 .env
 *.log
