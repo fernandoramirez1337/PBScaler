@@ -23,16 +23,16 @@ output:
 # Reused by the PBScaler-keff controller below as T_cold_i per service.
 temporal_gate:
   cold_times:
-    adservice: 60              # Java/Spring Boot
-    cartservice: 15            # C# (.NET)
-    checkoutservice: 2         # Go
-    currencyservice: 5         # Node.js
-    emailservice: 8            # Python
-    frontend: 2                # Go
-    paymentservice: 5          # Node.js
-    productcatalogservice: 2   # Go
-    recommendationservice: 8   # Python
-    shippingservice: 2         # Go
+    adservice: 37              # Java/Spring Boot
+    cartservice: 27            # C# (.NET)
+    checkoutservice: 6         # Go
+    currencyservice: 21        # Node.js
+    emailservice: 11           # Python
+    frontend: 18               # Go
+    paymentservice: 21         # Node.js
+    productcatalogservice: 5   # Go
+    recommendationservice: 10  # Python
+    shippingservice: 5         # Go
 
 # PBScaler-keff parameters (Cap_3 sec:nivel1, sec:nivel2, eq:fitness_new).
 # Defaults match Cap_3:161: alpha = beta = 0.45, lambda_csp = 0.10 with the
