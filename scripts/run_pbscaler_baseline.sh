@@ -111,10 +111,21 @@ fi
 echo "    PBScaler health check passed — still running after 5s"
 
 # ── Step 10: Run Locust load test ────────────────────────────────────────────
-echo "==> Step 10: Running Locust load test (10 min)"
-locust -f "${SCRIPT_DIR}/locustfile.py" --headless \
+# Parameterised via env vars so Sprint 1 Fase G can drive different shapes:
+#   LOCUSTFILE      path to a locustfile (absolute or relative to PROJECT_ROOT)
+#                   default: scripts/locustfile.py (upstream baseline)
+#   LOCUST_RUN_TIME duration string accepted by `locust --run-time`
+#                   default: 10m (preserves Sprint 0 behaviour)
+#   LOCUST_SEED     integer seed; exported so locustfiles can call
+#                   random.seed(int(os.environ["LOCUST_SEED"])) themselves.
+#                   Locust has no native --seed flag.
+LOCUSTFILE_PATH="${LOCUSTFILE:-${SCRIPT_DIR}/locustfile.py}"
+LOCUST_RUN_TIME_VAL="${LOCUST_RUN_TIME:-10m}"
+echo "==> Step 10: Running Locust load test (file=${LOCUSTFILE_PATH}, run_time=${LOCUST_RUN_TIME_VAL}, seed=${LOCUST_SEED:-<unset>})"
+[[ -n "${LOCUST_SEED:-}" ]] && export LOCUST_SEED
+locust -f "${LOCUSTFILE_PATH}" --headless \
     --host "http://${FRONTEND_IP}" \
-    --run-time 10m \
+    --run-time "${LOCUST_RUN_TIME_VAL}" \
     --csv "${OUT_DIR}/locust" --csv-full-history \
     --loglevel WARNING || true
 
@@ -149,12 +160,19 @@ python3 "${SCRIPT_DIR}/collect_metrics.py" \
 echo "==> Step 14: Generating per-experiment plots"
 python3 "${SCRIPT_DIR}/plot_results.py" "${OUT_DIR}"
 
-# ── Step 15: Generate comparison plots ───────────────────────────────────────
-echo "==> Step 15: Generating comparison plots (KHPA vs PBScaler)"
-python3 "${SCRIPT_DIR}/plot_comparison.py" \
-    --khpa-dir "${PROJECT_ROOT}/results/khpa_baseline" \
-    --pbscaler-dir "${OUT_DIR}" \
-    --out "${PROJECT_ROOT}/results/comparison"
+# ── Step 15: Generate comparison plots (skip if no KHPA baseline) ────────────
+# Sprint 1 runs PBScaler vanilla only — there is no KHPA baseline to compare
+# against. Don't let a missing baseline take down the whole run.
+KHPA_DIR="${PROJECT_ROOT}/results/khpa_baseline"
+if [[ -d "${KHPA_DIR}" && -f "${KHPA_DIR}/instances.csv" ]]; then
+    echo "==> Step 15: Generating comparison plots (KHPA vs PBScaler)"
+    python3 "${SCRIPT_DIR}/plot_comparison.py" \
+        --khpa-dir "${KHPA_DIR}" \
+        --pbscaler-dir "${OUT_DIR}" \
+        --out "${PROJECT_ROOT}/results/comparison" || echo "    (plot_comparison.py failed — non-fatal)"
+else
+    echo "==> Step 15: skipping comparison plots (no KHPA baseline)"
+fi
 
 # ── Step 16: Print key log lines ─────────────────────────────────────────────
 echo "==> Step 16: PBScaler log summary"

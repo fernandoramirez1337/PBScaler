@@ -1,26 +1,16 @@
 kubernetes:
-  namespace: online-boutique
-  # Path to kubeconfig file. Override with env var K8S_CONFIG.
+  namespace: train-ticket
   kubeconfig: ~/.kube/config
-  # Path to the Kubernetes manifest to apply (used by KubernetesClient.update_yaml).
-  manifest: ""
-
+  manifest: ''
 prometheus:
-  # Override with env vars PROM_RANGE_URL and PROM_QUERY_URL.
-  range_url: http://localhost:9090/api/v1/query_range
-  query_url: http://localhost:9090/api/v1/query
+  range_url: http://localhost:9091/api/v1/query_range
+  query_url: http://localhost:9091/api/v1/query
   step: 5
-
 autoscaler:
-  slo: 200         # target p90 latency in milliseconds
+  slo: 500
   max_pod: 5
   min_pod: 1
-  duration: 660    # experiment duration in seconds (600s load + 60s buffer)
-  # Path to the pre-trained RandomForest .model file.
-  # Relative paths are resolved from the project root.
-  simulation_model: simulation/boutique/RandomForestClassify.model
-
+  duration: 660
+  simulation_model: simulation/train_ticket/RandomForestClassify.model
 output:
-  # Directory for post-experiment CSV files.
-  # Relative paths are resolved from the project root.
   data_dir: output

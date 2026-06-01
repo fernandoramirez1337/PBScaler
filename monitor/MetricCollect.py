@@ -123,7 +123,17 @@ def collect_pod_num(config: Config, _dir: str):
     response = prom_util.execute_prom(config.prom_range_url, qps_sql)
     def handle(result, instance_df):
         if 'created_by_name' in result['metric']:
-            name = result['metric']['created_by_name'].split('-')[0] + '&count'
+            # created_by_name is the ReplicaSet name like "frontend-aa11bb22cc"
+            # or "ts-auth-service-c6c446684". Strip the trailing pod-template
+            # hash (a 5-10 char alnum suffix) to recover the deployment name.
+            # Sprint 1B fork patch — upstream's `.split('-')[0]` only worked
+            # for OB names without internal hyphens; on TT it collapsed all
+            # ts-* services into "ts".
+            import re as _re
+            rs_name = result['metric']['created_by_name']
+            m = _re.match(r'^(.+)-[a-z0-9]{5,10}$', rs_name)
+            svc_name = m.group(1) if m else rs_name.split('-')[0]
+            name = svc_name + '&count'
             values = result['values']
             values = list(zip(*values))
             if 'timestamp' not in instance_df:
@@ -202,10 +212,22 @@ def collect(config: Config, _dir: str):
     print('collect metrics')
     if not os.path.exists(_dir):
         os.makedirs(_dir)
-    collect_call_latency(config, _dir)
-    collect_svc_latency(config, _dir)
-    collect_resource_metric(config, _dir)
-    collect_succeess_rate(config, _dir)
-    collect_svc_qps(config, _dir)
-    collect_svc_metric(config, _dir)
-    collect_pod_num(config, _dir)
+    # Sprint 1B fork patch — wrap each step in try/except so a failure in one
+    # (e.g., collect_svc_metric returns empty cAdvisor data on TT) does not
+    # prevent the others (especially collect_pod_num → instances.csv) from
+    # writing their CSV. Each collect_* is independent and writes its own file.
+    import traceback as _tb
+    for fn in (
+        collect_call_latency,
+        collect_svc_latency,
+        collect_resource_metric,
+        collect_succeess_rate,
+        collect_svc_qps,
+        collect_svc_metric,
+        collect_pod_num,
+    ):
+        try:
+            fn(config, _dir)
+        except Exception as exc:
+            print(f'  WARN: {fn.__name__} failed: {exc.__class__.__name__}: {exc}')
+            _tb.print_exc()

@@ -85,13 +85,13 @@ def main():
     parser.add_argument('--out', default='results/khpa_baseline', help='Output directory')
     parser.add_argument(
         '--prom-range-url',
-        default=os.environ.get('PROM_RANGE_URL', 'http://localhost:9090/api/v1/query_range'),
-        help='Prometheus range query URL',
+        default=None,
+        help='Prometheus range query URL (defaults to config.yaml or PROM_RANGE_URL env)',
     )
     parser.add_argument(
         '--prom-query-url',
-        default=os.environ.get('PROM_QUERY_URL', 'http://localhost:9090/api/v1/query'),
-        help='Prometheus instant query URL',
+        default=None,
+        help='Prometheus instant query URL (defaults to config.yaml or PROM_QUERY_URL env)',
     )
     args = parser.parse_args()
 
@@ -102,8 +102,13 @@ def main():
 
     config = Config()
     config.namespace = args.namespace
-    config.prom_range_url = args.prom_range_url
-    config.prom_no_range_url = args.prom_query_url
+    # Sprint 1B fork patch — only override prometheus URLs if explicitly given.
+    # The default-9090 was clobbering the config.yaml value (port 9091 for the
+    # TT-clone-on-DOKS) when no --prom-range-url was passed.
+    if args.prom_range_url:
+        config.prom_range_url = args.prom_range_url
+    if args.prom_query_url:
+        config.prom_no_range_url = args.prom_query_url
     config.start = args.start
     config.end = args.end
 

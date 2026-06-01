@@ -1,30 +1,28 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────
-# setup_gke.sh -- Provision a minimal GKE experiment cluster for PBScaler
+# setup_train_ticket.sh -- Provision a GKE cluster for Train Ticket.
 #
 # Creates:
-#   • 3-node e2-standard-4 GKE cluster
-#   • Istio 1.13.4 service mesh (manual install via istioctl)
-#   • Online Boutique micro­services in namespace "online-boutique"
-#   • kube-prometheus-stack (Prometheus + Grafana) in namespace "monitoring"
-#   • Prometheus scrape config for Istio/Envoy metrics
+#   • 4-node n2-standard-4 GKE cluster (16 GB RAM × 4 = 64 GB total)
+#   • Istio service mesh
+#   • Train Ticket micro­services in namespace "train-ticket"
+#     deployed in 3 phases (databases → services → UI) per the upstream layout
+#   • kube-prometheus-stack in "monitoring"
 #
-# Idempotent: safe to re-run -- each step checks before creating.
+# Idempotent: safe to re-run.
 #
 # Usage:
-#   1. Edit scripts/gke.env  →  set PROJECT_ID
-#   2. bash scripts/setup_gke.sh
+#   1. Edit scripts/tt.env  →  set PROJECT_ID
+#   2. bash scripts/setup_train_ticket.sh
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-source "$SCRIPT_DIR/gke.env"
+source "$SCRIPT_DIR/tt.env"
 
-# Defaults if gke.env didn't define these
-BOUTIQUE_MANIFESTS="${BOUTIQUE_MANIFESTS:-benchmarks/microservices-demo/kubernetes-manifests}"
-ISTIO_MANIFESTS="${ISTIO_MANIFESTS:-benchmarks/microservices-demo/istio-manifests}"
+TT_MANIFESTS="${TT_MANIFESTS:-benchmarks/train-ticket/deployment/kubernetes-manifests/quickstart-k8s}"
 
 # ── Colours ───────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -43,35 +41,29 @@ for cmd in gcloud kubectl helm istioctl; do
 done
 if [[ ${#missing[@]} -gt 0 ]]; then
     err "Missing required tools: ${missing[*]}"
-    echo "  Install them before running this script."
-    echo "    gcloud:   https://cloud.google.com/sdk/docs/install"
-    echo "    kubectl:  gcloud components install kubectl"
-    echo "    helm:     https://helm.sh/docs/intro/install/"
-    echo "    istioctl: curl -L https://istio.io/downloadIstio | ISTIO_VERSION=$ISTIO_VERSION sh -"
     exit 1
 fi
-ok "All tools found: gcloud, kubectl, helm, istioctl"
+ok "All tools found"
 
 if [[ -z "$PROJECT_ID" ]]; then
-    err "PROJECT_ID is empty.  Edit scripts/gke.env and set your GCP project ID."
+    err "PROJECT_ID is empty. Edit scripts/tt.env and set your GCP project ID."
     exit 1
 fi
 ok "PROJECT_ID = $PROJECT_ID"
 
-# Set gcloud project
 gcloud config set project "$PROJECT_ID" --quiet
 ok "gcloud project set to $PROJECT_ID"
 
 # ── 1. Create GKE cluster ────────────────────────────────────────────
-banner "Step 1 -- GKE Cluster"
+banner "Step 1 -- GKE Cluster (Train Ticket sizing)"
 
 if gcloud container clusters describe "$CLUSTER_NAME" --zone "$ZONE" --project "$PROJECT_ID" &>/dev/null; then
     ok "Cluster '$CLUSTER_NAME' already exists in $ZONE -- skipping creation"
 else
-    info "Creating cluster '$CLUSTER_NAME' (3 × ${MACHINE_TYPE} in ${ZONE})..."
+    info "Creating cluster '$CLUSTER_NAME' (${NUM_NODES} × ${MACHINE_TYPE} in ${ZONE})..."
     # --disk-size 50: defaults to 100 GB pd-balanced which exceeds the
-    # default SSD_TOTAL_GB=250 quota at 3 nodes. 50 GB × 3 = 150 GB fits
-    # comfortably and is plenty for Online Boutique workloads.
+    # default SSD_TOTAL_GB=250 quota at 3 nodes. 50 GB × 3 = 150 GB fits,
+    # and is more than enough for the Train Ticket smoke deploy.
     gcloud container clusters create "$CLUSTER_NAME" \
         --zone "$ZONE" \
         --machine-type "$MACHINE_TYPE" \
@@ -98,16 +90,15 @@ ok "kubectl context set to $CLUSTER_NAME"
 banner "Step 3 -- Istio $ISTIO_VERSION"
 
 if kubectl get deployment istiod -n istio-system &>/dev/null; then
-    ok "Istio already installed (istiod found in istio-system) -- skipping"
+    ok "Istio already installed -- skipping"
 else
-    info "Installing Istio $ISTIO_VERSION with default profile..."
+    info "Installing Istio with default profile..."
     istioctl install --set profile=default -y
     ok "Istio installed"
 fi
 
-# Wait for istiod to be ready
 info "Waiting for istiod to be ready..."
-kubectl rollout status deployment/istiod -n istio-system --timeout=120s
+kubectl rollout status deployment/istiod -n istio-system --timeout=180s
 ok "istiod is ready"
 
 # ── 4. Create app namespace with sidecar injection ────────────────────
@@ -120,29 +111,46 @@ else
     ok "Namespace '$APP_NAMESPACE' created"
 fi
 
-# Ensure sidecar injection is enabled
 kubectl label namespace "$APP_NAMESPACE" istio-injection=enabled --overwrite
 ok "Istio sidecar injection enabled for $APP_NAMESPACE"
 
-# ── 5. Deploy Online Boutique ────────────────────────────────────────
-banner "Step 5 -- Online Boutique"
+# ── 5. Deploy Train Ticket (3 phases) ────────────────────────────────
+banner "Step 5 -- Train Ticket Deployment"
 
-info "Applying Kubernetes manifests from ${BOUTIQUE_MANIFESTS}..."
-kubectl apply -f "$PROJECT_ROOT/$BOUTIQUE_MANIFESTS/" -n "$APP_NAMESPACE"
-ok "Online Boutique workloads applied"
+MANIFEST_DIR="$PROJECT_ROOT/$TT_MANIFESTS"
+if [[ ! -d "$MANIFEST_DIR" ]]; then
+    err "Manifest dir not found: $MANIFEST_DIR"
+    exit 1
+fi
 
-# Apply Istio manifests (patch namespace from "hipster" → APP_NAMESPACE)
-info "Applying Istio manifests (gateway, virtual service, egress)..."
-for f in "$PROJECT_ROOT/$ISTIO_MANIFESTS/"*.yaml; do
-    sed "s/namespace: hipster/namespace: $APP_NAMESPACE/g" "$f" \
-        | kubectl apply -n "$APP_NAMESPACE" -f -
+PART1="$MANIFEST_DIR/quickstart-ts-deployment-part1.yml"
+PART2="$MANIFEST_DIR/quickstart-ts-deployment-part2.yml"
+PART3="$MANIFEST_DIR/quickstart-ts-deployment-part3.yml"
+
+for part in "$PART1" "$PART2" "$PART3"; do
+    if [[ ! -f "$part" ]]; then
+        err "Missing manifest: $part"
+        exit 1
+    fi
 done
-ok "Istio manifests applied"
+
+info "Phase 1/3 — Databases (part1.yml)"
+kubectl apply -f "$PART1" -n "$APP_NAMESPACE"
+info "Waiting 60 s for databases to start receiving traffic..."
+sleep 60
+
+info "Phase 2/3 — Services (part2.yml)"
+kubectl apply -f "$PART2" -n "$APP_NAMESPACE"
+info "Waiting 60 s for service deployments to register..."
+sleep 60
+
+info "Phase 3/3 — UI / Frontend (part3.yml)"
+kubectl apply -f "$PART3" -n "$APP_NAMESPACE"
+ok "All Train Ticket manifests applied"
 
 # ── 6. Install kube-prometheus-stack ──────────────────────────────────
 banner "Step 6 -- kube-prometheus-stack"
 
-# Add Helm repo (idempotent)
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
 helm repo update
 
@@ -195,7 +203,7 @@ ok "kube-prometheus-stack $HELM_CMD'd"
 # ── 7. Istio Prometheus integration -- PodMonitor ─────────────────────
 banner "Step 7 -- Istio metrics PodMonitor"
 
-kubectl apply -f - <<'EOF'
+kubectl apply -f - <<EOF
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -206,7 +214,7 @@ metadata:
 spec:
   namespaceSelector:
     matchNames:
-      - online-boutique
+      - $APP_NAMESPACE
       - istio-system
   selector:
     matchExpressions:
@@ -224,58 +232,53 @@ spec:
 EOF
 ok "PodMonitor for Istio Envoy sidecars created"
 
-# ── 8. Wait for Online Boutique pods ──────────────────────────────────
-banner "Step 8 -- Verifying Online Boutique pods"
+# ── 8. Wait for Train Ticket pods (longer timeout — 41 Java services) ─
+banner "Step 8 -- Verifying Train Ticket pods"
 
-info "Waiting for all deployments in $APP_NAMESPACE to be ready (timeout 5m)..."
+info "Waiting up to 10 min for all deployments to be ready..."
 
 deployments=$(kubectl get deployments -n "$APP_NAMESPACE" -o jsonpath='{.items[*].metadata.name}')
+total=$(echo "$deployments" | wc -w | tr -d ' ')
+info "Total deployments: $total"
+
+failed=()
 for dep in $deployments; do
     info "  Waiting for ${dep}..."
-    kubectl rollout status deployment/"$dep" -n "$APP_NAMESPACE" --timeout=300s || {
-        warn "$dep did not become ready in time"
-    }
+    if ! kubectl rollout status deployment/"$dep" -n "$APP_NAMESPACE" --timeout=600s; then
+        warn "$dep did not become ready in 10 min"
+        failed+=("$dep")
+    fi
 done
 
 echo ""
+if [[ ${#failed[@]} -gt 0 ]]; then
+    warn "${#failed[@]} deployment(s) failed to roll out: ${failed[*]}"
+    warn "Likely cause: OOM. Inspect with: kubectl describe pod -n $APP_NAMESPACE <pod>"
+    warn "Consider raising resources.requests.memory in the manifests, or NUM_NODES in tt.env"
+else
+    ok "All $total deployments are Ready"
+fi
+
 info "Pod status in $APP_NAMESPACE:"
 kubectl get pods -n "$APP_NAMESPACE" -o wide
 echo ""
 
-# Check sidecar injection (expect 2/2 or 3/3 READY containers)
-info "Checking sidecar injection..."
-NOT_INJECTED=0
-while IFS= read -r line; do
-    pod_name=$(echo "$line" | awk '{print $1}')
-    ready=$(echo "$line" | awk '{print $2}')
-    containers_ready=$(echo "$ready" | cut -d/ -f1)
-    containers_total=$(echo "$ready" | cut -d/ -f2)
-    if [[ "$containers_total" -lt 2 ]]; then
-        warn "  $pod_name has $containers_total container(s) -- sidecar may not be injected"
-        NOT_INJECTED=$((NOT_INJECTED + 1))
-    else
-        ok "  $pod_name -- $ready containers (sidecar present)"
-    fi
-done < <(kubectl get pods -n "$APP_NAMESPACE" --no-headers 2>/dev/null | grep -v "Completed\|Terminating")
+# ── 9. Find UI dashboard service ──────────────────────────────────────
+banner "Step 9 -- Locating UI Dashboard"
 
-if [[ $NOT_INJECTED -gt 0 ]]; then
-    warn "$NOT_INJECTED pod(s) may be missing Istio sidecars"
+UI_SVC="ts-ui-dashboard"
+if kubectl get svc "$UI_SVC" -n "$APP_NAMESPACE" &>/dev/null; then
+    UI_TYPE=$(kubectl get svc "$UI_SVC" -n "$APP_NAMESPACE" -o jsonpath='{.spec.type}')
+    info "Service '$UI_SVC' is of type: $UI_TYPE"
+    if [[ "$UI_TYPE" == "NodePort" ]]; then
+        NODE_PORT=$(kubectl get svc "$UI_SVC" -n "$APP_NAMESPACE" -o jsonpath='{.spec.ports[0].nodePort}')
+        warn "UI exposed via NodePort $NODE_PORT — load tests will use 'kubectl port-forward'"
+    fi
 else
-    ok "All pods have Istio sidecars injected"
+    warn "Service '$UI_SVC' not found"
 fi
 
-# ── 9. Verify Prometheus ──────────────────────────────────────────────
-banner "Step 9 -- Verifying Prometheus"
-
-info "Prometheus pods in $MON_NAMESPACE:"
-kubectl get pods -n "$MON_NAMESPACE" -l app.kubernetes.io/name=prometheus
-echo ""
-
-info "Grafana pods in $MON_NAMESPACE:"
-kubectl get pods -n "$MON_NAMESPACE" -l app.kubernetes.io/name=grafana
-echo ""
-
-# ── 10. Port-forward commands ─────────────────────────────────────────
+# ── 10. Helpful pointers ──────────────────────────────────────────────
 banner "Step 10 -- Port-Forward Commands"
 
 GRAFANA_PASS=$(kubectl get secret -n "$MON_NAMESPACE" "${PROM_RELEASE}-grafana" \
@@ -283,28 +286,24 @@ GRAFANA_PASS=$(kubectl get secret -n "$MON_NAMESPACE" "${PROM_RELEASE}-grafana" 
 
 cat <<CMDS
 
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  Port-forward commands (run in separate terminals)                 │
-  ├─────────────────────────────────────────────────────────────────────┤
-  │                                                                     │
-  │  Prometheus  (http://localhost:9090):                               │
-  │    kubectl port-forward -n $MON_NAMESPACE svc/${PROM_RELEASE}-kube-prom-prometheus 9090:9090
-  │                                                                     │
-  │  Grafana  (http://localhost:3000):                                  │
-  │    kubectl port-forward -n $MON_NAMESPACE svc/${PROM_RELEASE}-grafana 3000:80
-  │    Login: admin / ${GRAFANA_PASS}
-  │                                                                     │
-  │  Online Boutique  (http://localhost:8080):                          │
-  │    kubectl port-forward -n $APP_NAMESPACE svc/frontend 8080:80
-  │                                                                     │
-  │  PBScaler config.yaml overrides:                                   │
-  │    export PROM_RANGE_URL=http://localhost:9090/api/v1/query_range   │
-  │    export PROM_QUERY_URL=http://localhost:9090/api/v1/query         │
-  │    export K8S_NAMESPACE=$APP_NAMESPACE                              │
-  │                                                                     │
-  └─────────────────────────────────────────────────────────────────────┘
+  Train Ticket cluster ready.
+
+  Prometheus  (http://localhost:9090):
+    kubectl port-forward -n $MON_NAMESPACE svc/${PROM_RELEASE}-kube-prom-prometheus 9090:9090
+
+  Grafana  (http://localhost:3000):
+    kubectl port-forward -n $MON_NAMESPACE svc/${PROM_RELEASE}-grafana 3000:80
+    Login: admin / ${GRAFANA_PASS}
+
+  Train Ticket UI:
+    kubectl port-forward -n $APP_NAMESPACE svc/$UI_SVC 8080:8080
+
+  PBScaler config overrides:
+    export K8S_NAMESPACE=$APP_NAMESPACE
+    export PROM_RANGE_URL=http://localhost:9090/api/v1/query_range
+    export PROM_QUERY_URL=http://localhost:9090/api/v1/query
 
 CMDS
 
-ok "Setup complete!  Cluster: $CLUSTER_NAME ($ZONE), $NUM_NODES × $MACHINE_TYPE"
-warn "Remember to run  scripts/teardown_gke.sh  when done to avoid billing."
+ok "Setup complete. Cluster: $CLUSTER_NAME ($ZONE), $NUM_NODES × $MACHINE_TYPE"
+warn "Remember to run scripts/teardown_train_ticket.sh when done."

@@ -10,9 +10,12 @@ PBScaler is a bottleneck-aware autoscaling framework for Kubernetes microservice
 
 ## Commands
 
+Python 3.10+ recommended. Note `requirements.txt` does **not** pin `pymoo`, `scikit-learn`, or `networkx` even though the runtime imports them — install them manually if missing.
+
 ```bash
 # Install dependencies
 pip install -r requirements.txt
+pip install pymoo scikit-learn networkx
 
 # Run the test suite (no live cluster needed — uses mock Prometheus + K8s)
 pytest tests/test_pipeline.py -v
@@ -61,6 +64,10 @@ output:
 Environment variables (`K8S_NAMESPACE`, `K8S_CONFIG`, `PROM_RANGE_URL`, `PROM_QUERY_URL`) take precedence over `config.yaml` values.
 
 ## Architecture
+
+### Entry Point (`main.py`)
+
+`main.py` is the single entry point. `initController(name, config)` lazily imports and instantiates one of the controllers below; the active controller is hardcoded in `__main__` (default: `'PBScaler'`). After `controller.start()` returns, `monitor.MetricCollect.collect()` writes CSVs into `config.data_dir` (default `output/`, created on demand).
 
 ### Core Loop (`PBScaler.py`)
 
@@ -167,3 +174,5 @@ Mocks live in `tests/mocks/`: `MockPrometheusServer` (real HTTP, no live Prometh
 - Training data paths in `simulation/RandomForestClassify.py` are hardcoded
 - No connectivity checks for Prometheus or Kubernetes on startup
 - `RL/Environment.py` hardcodes `redis-cart` node removal and `SLO=200`, bypassing `config.yaml`
+- `requirements.txt` is missing `pymoo`, `scikit-learn`, and `networkx` (all imported at runtime)
+- The active controller in `main.py` is hardcoded — switching baselines requires editing the source

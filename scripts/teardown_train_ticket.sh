@@ -1,22 +1,17 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────
-# teardown_gke.sh — Delete the PBScaler experiment GKE cluster
+# teardown_train_ticket.sh — Delete the Train Ticket experiment cluster
 #
 # Removes (in order):
 #   1. Helm releases (kube-prometheus-stack)
 #   2. App and monitoring namespaces
 #   3. Istio (istioctl uninstall --purge)
 #   4. The GKE cluster itself
-#
-# Idempotent: safe to re-run — each step checks before deleting.
-#
-# Usage:
-#   bash scripts/teardown_gke.sh
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/gke.env"
+source "$SCRIPT_DIR/tt.env"
 
 # ── Colours ───────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -26,14 +21,13 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 banner(){ echo -e "\n${CYAN}════════════════════════════════════════════════════════════════${NC}"; echo -e "${CYAN}  $*${NC}"; echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}\n"; }
 
-# ── Validate ──────────────────────────────────────────────────────────
 if [[ -z "$PROJECT_ID" ]]; then
-    err "PROJECT_ID is empty.  Edit scripts/gke.env and set your GCP project ID."
+    err "PROJECT_ID is empty. Edit scripts/tt.env and set your GCP project ID."
     exit 1
 fi
 
 banner "Teardown — $CLUSTER_NAME ($ZONE)"
-echo -e "${YELLOW}This will permanently delete the cluster and all workloads.${NC}"
+echo -e "${YELLOW}This will permanently delete the Train Ticket cluster and all workloads.${NC}"
 echo ""
 read -rp "Continue? [y/N] " confirm
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
@@ -41,7 +35,6 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# ── Check if cluster exists and get credentials ──────────────────────
 if ! gcloud container clusters describe "$CLUSTER_NAME" --zone "$ZONE" --project "$PROJECT_ID" &>/dev/null; then
     warn "Cluster '$CLUSTER_NAME' does not exist in $ZONE — nothing to delete."
     exit 0
@@ -64,7 +57,6 @@ else
     ok "Helm release '$PROM_RELEASE' not found — skipping"
 fi
 
-# Clean up CRDs left by kube-prometheus-stack
 info "Cleaning up Prometheus CRDs..."
 kubectl delete crd prometheuses.monitoring.coreos.com \
     prometheusrules.monitoring.coreos.com \
@@ -84,7 +76,7 @@ banner "Step 2 — Namespaces"
 for ns in "$APP_NAMESPACE" "$MON_NAMESPACE"; do
     if kubectl get namespace "$ns" &>/dev/null; then
         info "Deleting namespace '$ns'..."
-        kubectl delete namespace "$ns" --timeout=120s || warn "Namespace '$ns' deletion timed out"
+        kubectl delete namespace "$ns" --timeout=180s || warn "Namespace '$ns' deletion timed out"
         ok "Namespace '$ns' deleted"
     else
         ok "Namespace '$ns' does not exist — skipping"
@@ -104,7 +96,7 @@ if kubectl get namespace istio-system &>/dev/null; then
     kubectl delete namespace istio-system --timeout=120s 2>/dev/null || true
     ok "Istio removed"
 else
-    ok "Istio not installed (istio-system not found) — skipping"
+    ok "Istio not installed — skipping"
 fi
 
 # ── 4. Delete GKE cluster ────────────────────────────────────────────
@@ -118,7 +110,6 @@ gcloud container clusters delete "$CLUSTER_NAME" \
 
 ok "Cluster '$CLUSTER_NAME' deleted"
 
-# ── Done ──────────────────────────────────────────────────────────────
 banner "Teardown Complete"
 echo -e "  ${GREEN}All resources deleted.  No ongoing billing for this cluster.${NC}"
 echo ""
